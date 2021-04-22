@@ -46,6 +46,8 @@
 #include "pci_core.h"
 #include "acpi.h"
 #include "dm.h"
+#include "passthru.h"
+#include "ptm.h"
 
 
 /* Some audio drivers get topology data from ACPI NHLT table.
@@ -69,32 +71,6 @@ uint32_t gpu_opregion_gpa = 0;
 /* reference count for libpciaccess init/deinit */
 static int pciaccess_ref_cnt;
 static pthread_mutex_t ref_cnt_mtx = PTHREAD_MUTEX_INITIALIZER;
-
-
-struct passthru_dev {
-	struct pci_vdev *dev;
-	struct pcibar bar[PCI_BARMAX + 1];
-	struct {
-		int		capoff;
-	} msi;
-	struct {
-		int		capoff;
-	} msix;
-	struct {
-		int 		capoff;
-	} pmcap;
-	bool pcie_cap;
-	struct pcisel sel;
-	int phys_pin;
-	uint16_t phys_bdf;
-	struct pci_device *phys_dev;
-	/* Options for passthrough device:
-	 *   need_reset - reset dev before passthrough
-	 */
-	bool need_reset;
-	bool d3hot_reset;
-	bool (*has_virt_pcicfg_regs)(int offset);
-};
 
 static uint32_t
 read_config(struct pci_device *phys_dev, long reg, int width)
@@ -550,6 +526,7 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	bool keep_gsi = false;
 	bool need_reset = true;
 	bool d3hot_reset = false;
+	bool enable_ptm = false;
 	int vmsix_on_msi_bar_id = -1;
 	struct acrn_assign_pcidev pcidev = {};
 	uint16_t vendor = 0, device = 0;
@@ -590,7 +567,9 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 				pr_err("faild to parse msix emulation bar id");
 				return -EINVAL;
 			}
-
+		} else if (!strncmp(opt, "enable_ptm", 10)) {
+			pr_notice("<PTM>: opt=enable_ptm.\n");
+			enable_ptm = true;
 		} else
 			pr_warn("Invalid passthru options:%s", opt);
 	}
@@ -693,6 +672,22 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 				bus, slot, func, ptdev->phys_pin);
 			error = -1;
 			goto done;
+		}
+	}
+
+	if (enable_ptm) {
+		error = ptm_probe(ctx, ptdev);
+
+		if (!error) {
+			/* if ptm is enabled, ptm capable ptdev and it upstream root port are pass through to the guest.
+			 * TO simplify implementation, we keep the same pci topology between the 2 devices and no need
+			 * to create new virtual bdf for ptdevice.
+			 * */
+			pcidev.virt_bdf = pcidev.phys_bdf;
+		}
+		else {
+			enable_ptm = false;
+			pr_err("%s: Failed to enable PTM on passthrough device %x:%x:%x.\n", __func__, bus, slot, func);
 		}
 	}
 
