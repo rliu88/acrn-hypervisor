@@ -36,6 +36,7 @@
 #include <vacpi.h>
 #include <logmsg.h>
 #include "vpci_priv.h"
+#include "vroot_port.h"
 #include <x86/pci_dev.h>
 #include <hash.h>
 
@@ -663,6 +664,7 @@ int32_t vpci_assign_pcidev(struct acrn_vm *tgt_vm, struct acrn_assign_pcidev *pc
 {
 	int32_t ret = 0;
 	uint32_t idx;
+	uint8_t pcie_dev_type;
 	struct pci_vdev *vdev_in_sos, *vdev;
 	struct acrn_vpci *vpci;
 	union pci_bdf bdf;
@@ -673,47 +675,72 @@ int32_t vpci_assign_pcidev(struct acrn_vm *tgt_vm, struct acrn_assign_pcidev *pc
 	spinlock_obtain(&sos_vm->vpci.lock);
 	vdev_in_sos = pci_find_vdev(&sos_vm->vpci, bdf);
 	if ((vdev_in_sos != NULL) && (vdev_in_sos->user == vdev_in_sos) &&
-			(vdev_in_sos->pdev != NULL) &&
-			!is_host_bridge(vdev_in_sos->pdev) && !is_bridge(vdev_in_sos->pdev)) {
-
-		/* ToDo: Each PT device must support one type reset */
-		if (!vdev_in_sos->pdev->has_pm_reset && !vdev_in_sos->pdev->has_flr &&
-				!vdev_in_sos->pdev->has_af_flr) {
-			pr_fatal("%s %x:%x.%x not support FLR or not support PM reset\n",
-				__func__, bdf.bits.b,  bdf.bits.d,  bdf.bits.f);
-		} else {
-			/* DM will reset this device before assigning it */
-			pdev_restore_bar(vdev_in_sos->pdev);
-		}
-
-		vdev_in_sos->vdev_ops->deinit_vdev(vdev_in_sos);
-
-		vpci = &(tgt_vm->vpci);
-
-		spinlock_obtain(&tgt_vm->vpci.lock);
-		vdev = vpci_init_vdev(vpci, vdev_in_sos->pci_dev_config, vdev_in_sos->phyfun);
-		pci_vdev_write_vcfg(vdev, PCIR_INTERRUPT_LINE, 1U, pcidev->intr_line);
-		pci_vdev_write_vcfg(vdev, PCIR_INTERRUPT_PIN, 1U, pcidev->intr_pin);
-		for (idx = 0U; idx < vdev->nr_bars; idx++) {
-			/* VF is assigned to a UOS */
-			if (vdev->phyfun != NULL) {
-				vdev->vbars[idx] = vdev_in_sos->vbars[idx];
-				if (has_msix_cap(vdev) && (idx == vdev->msix.table_bar)) {
-					vdev->msix.mmio_hpa = vdev->vbars[idx].base_hpa;
-					vdev->msix.mmio_size = vdev->vbars[idx].size;
-				}
+			(vdev_in_sos->pdev != NULL) && !is_host_bridge(vdev_in_sos->pdev)) {
+		// case: pass through device
+		if (!is_bridge(vdev_in_sos->pdev)) {
+			/* ToDo: Each PT device must support one type reset */
+			if (!vdev_in_sos->pdev->has_pm_reset && !vdev_in_sos->pdev->has_flr &&
+					!vdev_in_sos->pdev->has_af_flr) {
+				pr_fatal("%s %x:%x.%x not support FLR or not support PM reset\n",
+					__func__, bdf.bits.b,  bdf.bits.d,  bdf.bits.f);
+			} else {
+				/* DM will reset this device before assigning it */
+				pdev_restore_bar(vdev_in_sos->pdev);
 			}
-			pci_vdev_write_vbar(vdev, idx, pcidev->bar[idx]);
-		}
 
-		vdev->flags |= pcidev->type;
-		vdev->bdf.value = pcidev->virt_bdf;
-		/*We should re-add the vdev to hashlist since its vbdf has changed */
-		hlist_del(&vdev->link);
-		hlist_add_head(&vdev->link, &vpci->vdevs_hlist_heads[hash64(vdev->bdf.value, VDEV_LIST_HASHBITS)]);
-		vdev->parent_user = vdev_in_sos;
-		spinlock_release(&tgt_vm->vpci.lock);
-		vdev_in_sos->user = vdev;
+			vdev_in_sos->vdev_ops->deinit_vdev(vdev_in_sos);
+
+			vpci = &(tgt_vm->vpci);
+
+			spinlock_obtain(&tgt_vm->vpci.lock);
+			vdev = vpci_init_vdev(vpci, vdev_in_sos->pci_dev_config, vdev_in_sos->phyfun);
+			pci_vdev_write_vcfg(vdev, PCIR_INTERRUPT_LINE, 1U, pcidev->intr_line);
+			pci_vdev_write_vcfg(vdev, PCIR_INTERRUPT_PIN, 1U, pcidev->intr_pin);
+			for (idx = 0U; idx < vdev->nr_bars; idx++) {
+				/* VF is assigned to a UOS */
+				if (vdev->phyfun != NULL) {
+					vdev->vbars[idx] = vdev_in_sos->vbars[idx];
+					if (has_msix_cap(vdev) && (idx == vdev->msix.table_bar)) {
+						vdev->msix.mmio_hpa = vdev->vbars[idx].base_hpa;
+						vdev->msix.mmio_size = vdev->vbars[idx].size;
+					}
+				}
+				pci_vdev_write_vbar(vdev, idx, pcidev->bar[idx]);
+			}
+
+			vdev->flags |= pcidev->type;
+			vdev->bdf.value = pcidev->virt_bdf;
+			/*We should re-add the vdev to hashlist since its vbdf has changed */
+			hlist_del(&vdev->link);
+			hlist_add_head(&vdev->link, &vpci->vdevs_hlist_heads[hash64(vdev->bdf.value, VDEV_LIST_HASHBITS)]);
+			vdev->parent_user = vdev_in_sos;
+			spinlock_release(&tgt_vm->vpci.lock);
+			vdev_in_sos->user = vdev;
+		}
+		// case: pass through root port
+		else {
+			pcie_dev_type = ((uint8_t)pci_pdev_read_cfg(vdev_in_sos->pdev->bdf, vdev_in_sos->pdev->pcie_capoff + PCIER_FLAGS, 1)) & 0xF0U;
+
+			if ( pcie_dev_type == PCIEM_TYPE_ROOT_PORT ) {
+				vdev_in_sos->pci_dev_config->vdev_ops = &vroot_port_ops;
+
+				spinlock_obtain(&tgt_vm->vpci.lock);
+
+				vpci = &(tgt_vm->vpci);
+				vdev = vpci_init_vdev(vpci, vdev_in_sos->pci_dev_config, vdev_in_sos->phyfun);
+				vdev->bdf.value = pcidev->virt_bdf;
+
+				/*We should re-add the vdev to hashlist since its vbdf has changed */
+				hlist_del(&vdev->link);
+				hlist_add_head(&vdev->link, &vpci->vdevs_hlist_heads[hash64(vdev->bdf.value, VDEV_LIST_HASHBITS)]);
+				vdev->parent_user = vdev_in_sos;
+				spinlock_release(&tgt_vm->vpci.lock);
+				vdev_in_sos->user = vdev;
+			}
+			else {
+				pr_fatal("%s: cannot pass through bridge other than root port.\n");
+			}
+		}
 	} else {
 		pr_fatal("%s, can't find PCI device %x:%x.%x for vm[%d] %x:%x.%x\n", __func__,
 			pcidev->phys_bdf >> 8U, (pcidev->phys_bdf >> 3U) & 0x1fU, pcidev->phys_bdf & 0x7U,

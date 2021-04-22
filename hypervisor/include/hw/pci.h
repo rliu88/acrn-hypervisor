@@ -188,6 +188,13 @@
 #define PCIR_AF_CTRL          0x4U
 #define PCIM_AF_FLR           0x1U
 
+/* PCI Express Device Type definitions */
+#define        PCIER_FLAGS             0x2
+#define        PCIEM_FLAGS_TYPE                0x00F0
+#define        PCIEM_TYPE_ENDPOINT             0x0000
+#define        PCIEM_TYPE_ROOT_PORT            0x0040
+#define        PCIEM_TYPE_ROOT_INT_EP          0x0090
+
 #define PCI_STD_NUM_BARS        6U
 
 union pci_bdf {
