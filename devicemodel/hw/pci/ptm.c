@@ -55,6 +55,30 @@ get_ptm_cap(struct pci_device *pdev, int *offset)
 	return cap;
 }
 
+/* assign pci root port to vm */
+static int
+assign_pci_root_port(struct vmctx *ctx, struct passthru_dev *ptdev, struct pci_device *root_port)
+{
+	int error = 0;
+	struct acrn_assign_pcidev assign_pcidev = {};
+
+	assign_pcidev.phys_bdf = PCI_BDF(root_port->bus, root_port->dev, root_port->func);
+
+	// virtual root port takes the same bdf as its downstream device
+	assign_pcidev.virt_bdf = PCI_BDF(ptdev->dev->bus, ptdev->dev->slot, ptdev->dev->func);
+
+	pr_info("%s: virtual root port info: phys_bdf = 0x%x, virt_pdf = 0x%x.\n",
+			__func__, assign_pcidev.phys_bdf, assign_pcidev.virt_bdf);
+
+	error = vm_assign_pcidev(ctx, &assign_pcidev);
+
+	if (error)
+		pr_err("%s: failed to assign pci dev [%x:%x.%x] to hv.\n", __func__,
+				root_port->bus, root_port->dev, root_port->func);
+
+	return error;
+}
+
 /* Probe whether device and its root port support PTM */
 int ptm_probe(struct vmctx *ctx, struct passthru_dev *ptdev)
 {
@@ -100,6 +124,10 @@ int ptm_probe(struct vmctx *ctx, struct passthru_dev *ptdev)
 				root_port->func, phys_dev->bus, phys_dev->dev, phys_dev->func);
 			return -EINVAL;
 		}
+
+		// assign root port to vm
+		assign_pci_root_port(ctx, ptdev, root_port);
+
 	} else if (pcie_type == PCIEM_TYPE_ROOT_INT_EP) {
 		// No need to emulate root port if ptm requestor is RCIE
 		pr_notice("%s: ptm requestor is root complex integrated device.\n",
