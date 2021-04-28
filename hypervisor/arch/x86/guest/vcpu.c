@@ -643,6 +643,12 @@ int32_t run_vcpu(struct acrn_vcpu *vcpu)
 		 */
 		flush_vpid_global();
 
+#ifdef CONFIG_HYPERV_ENABLED
+		if (is_vcpu_bsp(vcpu)) {
+			hyperv_init_time(vcpu->vm);
+		}
+#endif
+
 		/* Set vcpu launched */
 		vcpu->launched = true;
 
@@ -839,6 +845,7 @@ static void context_switch_out(struct thread_object *prev)
 
 	/* We don't flush TLB as we assume each vcpu has different vpid */
 	ectx->ia32_star = msr_read(MSR_IA32_STAR);
+	ectx->ia32_cstar = msr_read(MSR_IA32_CSTAR);
 	ectx->ia32_lstar = msr_read(MSR_IA32_LSTAR);
 	ectx->ia32_fmask = msr_read(MSR_IA32_FMASK);
 	ectx->ia32_kernel_gs_base = msr_read(MSR_IA32_KERNEL_GS_BASE);
@@ -854,6 +861,7 @@ static void context_switch_in(struct thread_object *next)
 	load_vmcs(vcpu);
 
 	msr_write(MSR_IA32_STAR, ectx->ia32_star);
+	msr_write(MSR_IA32_CSTAR, ectx->ia32_cstar);
 	msr_write(MSR_IA32_LSTAR, ectx->ia32_lstar);
 	msr_write(MSR_IA32_FMASK, ectx->ia32_fmask);
 	msr_write(MSR_IA32_KERNEL_GS_BASE, ectx->ia32_kernel_gs_base);

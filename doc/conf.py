@@ -272,7 +272,15 @@ htmlhelp_basename = 'ACRN Project Help'
 
 # -- Options for LaTeX output ---------------------------------------------
 
+latex_engine = "xelatex"
+
 latex_elements = {
+    'fontpkg': r'''
+\setmainfont{DejaVu Serif}
+\setsansfont{DejaVu Sans}
+\setmonofont{DejaVu Sans Mono}
+''',
+
     # The paper size ('letterpaper' or 'a4paper').
     #
     # 'papersize': 'letterpaper',
@@ -283,7 +291,27 @@ latex_elements = {
 
     # Additional stuff for the LaTeX preamble.
     #
-    # 'preamble': '',
+    'preamble': r'''
+\setcounter{tocdepth}{3}
+\renewcommand\_{\textunderscore\allowbreak}
+\usepackage{listings}
+\usepackage{xcolor}
+\definecolor{IntelMNBlue}{HTML}{003C71}
+\usepackage{titlesec}
+\title{\normalfont\\color{IntelMNBlue}}
+\usepackage{colortbl}
+\protected\def\sphinxstyletheadfamily{\cellcolor[HTML]{DCDCDC}\sffamily\bfseries\color{IntelMNBlue}}
+''',
+    'sphinxsetup': 'hmargin={0.7in,0.7in}, vmargin={1in,1in},\
+verbatimwithframe=true,\
+verbatimwrapslines=true,\
+TitleColor={HTML}{003C71},\
+HeaderFamily=\\rmfamily\\bfseries, \
+InnerLinkColor={HTML}{003C71},\
+OuterLinkColor={HTML}{003C71},\
+VerbatimColor={HTML}{F0F0F0},\
+VerbatimHighlightColor={HTML}{76CEFF},\
+VerbatimBorderColor={HTML}{00285A}',
 
     # Latex figure (float) alignment
     #
@@ -298,6 +326,7 @@ latex_documents = [
      u'Project ACRN', 'manual'),
 ]
 
+latex_logo = 'images/ACRN_Logo_PrimaryLockup_COLOR-300x300-1.png'
 
 # -- Options for manual page output ---------------------------------------
 

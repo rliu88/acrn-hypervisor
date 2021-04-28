@@ -56,41 +56,11 @@ u64_mul_u64_shr64(uint64_t a, uint64_t b)
 	return ret;
 }
 
-static inline void
-hyperv_get_tsc_scale_offset(struct acrn_vm *vm, uint64_t *scale, uint64_t *offset)
-{
-	if (vm->arch_vm.hyperv.tsc_scale == 0UL) {
-		/*
-		 * The partition reference time is computed by the following formula:
-		 * ReferenceTime = ((VirtualTsc * TscScale) >> 64) + TscOffset
-		 * ReferenceTime is in 100ns units
-		 *
-		 * ReferenceTime =
-		 *     VirtualTsc / (get_tsc_khz() * 1000) * 1000000000 / 100
-		 *     + TscOffset
-		 */
-
-		uint64_t ret, khz = get_tsc_khz();
-
-		/* ret = (10000U << 64U) / get_tsc_khz() */
-		ret = u64_shl64_div_u64(10000U, khz);
-
-		dev_dbg(DBG_LEVEL_HYPERV, "%s, ret = 0x%lx", __func__, ret);
-
-		vm->arch_vm.hyperv.tsc_scale = ret;
-		vm->arch_vm.hyperv.tsc_offset = 0UL;
-	}
-
-	*scale = vm->arch_vm.hyperv.tsc_scale;
-	*offset = vm->arch_vm.hyperv.tsc_offset;
-}
-
 static void
 hyperv_setup_tsc_page(const struct acrn_vcpu *vcpu, uint64_t val)
 {
 	union hyperv_ref_tsc_page_msr *ref_tsc_page = &vcpu->vm->arch_vm.hyperv.ref_tsc_page;
 	struct HV_REFERENCE_TSC_PAGE *p;
-	uint64_t tsc_scale, tsc_offset;
 	uint32_t tsc_seq;
 
 	ref_tsc_page->val64 = val;
@@ -98,10 +68,9 @@ hyperv_setup_tsc_page(const struct acrn_vcpu *vcpu, uint64_t val)
 	if (ref_tsc_page->enabled == 1U) {
 		p = (struct HV_REFERENCE_TSC_PAGE *)gpa2hva(vcpu->vm, ref_tsc_page->gpfn << PAGE_SHIFT);
 		if (p != NULL) {
-			hyperv_get_tsc_scale_offset(vcpu->vm, &tsc_scale, &tsc_offset);
 			stac();
-			p->tsc_scale = tsc_scale;
-			p->tsc_offset = tsc_offset;
+			p->tsc_scale = vcpu->vm->arch_vm.hyperv.tsc_scale;
+			p->tsc_offset = vcpu->vm->arch_vm.hyperv.tsc_offset;
 			cpu_write_memory_barrier();
 			tsc_seq = p->tsc_sequence + 1U;
 			if ((tsc_seq == 0xFFFFFFFFU) || (tsc_seq == 0U)) {
@@ -114,19 +83,19 @@ hyperv_setup_tsc_page(const struct acrn_vcpu *vcpu, uint64_t val)
 }
 
 static inline uint64_t
-hyperv_get_ref_count(struct acrn_vm *vm)
+hyperv_scale_tsc(uint64_t scale)
 {
-	uint64_t tsc, tsc_scale, tsc_offset, ret;
+	uint64_t tsc;
 
-	/* currently only "use tsc offsetting" is set to 1 */
 	tsc = rdtsc() + exec_vmread64(VMX_TSC_OFFSET_FULL);
 
-	hyperv_get_tsc_scale_offset(vm, &tsc_scale, &tsc_offset);
+	return u64_mul_u64_shr64(tsc, scale);
+}
 
-	/* ret = ((tsc * tsc_scale) >> 64) + tsc_offset */
-	ret = u64_mul_u64_shr64(tsc, tsc_scale) + tsc_offset;
-
-	return ret;
+static inline uint64_t
+hyperv_get_ReferenceTime(struct acrn_vm *vm)
+{
+	return hyperv_scale_tsc(vm->arch_vm.hyperv.tsc_scale) - vm->arch_vm.hyperv.tsc_offset;
 }
 
 static void
@@ -136,8 +105,23 @@ hyperv_setup_hypercall_page(const struct acrn_vcpu *vcpu, uint64_t val)
 	uint64_t page_gpa;
 	void *page_hva;
 
-	/* asm volatile ("mov $2,%%eax; mov $0,%%edx; ret":::"eax","edx"); */
-	const uint8_t inst[11] = {0xb8U, 0x02U, 0x0U, 0x0U, 0x0U, 0xbaU, 0x0U, 0x0U, 0x0U, 0x0U, 0xc3U};
+	/*
+	 * All enlightened versions of Windows operating systems invoke guest hypercalls on
+	 * the basis of the recommendations presented by the hypervisor in CPUID.40000004:EAX.
+	 * A conforming hypervisor must return HV_STATUS_INVALID_HYPERCALL_CODE for any
+	 * unimplemented hypercalls.
+	 * ACRN does not wish to handle any hypercalls at moment, the following hypercall 
+	 * code page is implemented for this purpose.
+	 * inst32[] for 32 bits:
+	 * 	mov eax, 0x02 ; HV_STATUS_INVALID_HYPERCALL_CODE
+	 * 	mov edx, 0
+	 * 	ret
+	 * inst64[] for 64 bits:
+	 * 	mov rax, 0x02 ; HV_STATUS_INVALID_HYPERCALL_CODE
+	 * 	ret
+	 */
+	const uint8_t inst32[11] = {0xb8U, 0x02U, 0x0U, 0x0U, 0x0U, 0xbaU, 0x0U, 0x0U, 0x0U, 0x0U, 0xc3U};
+	const uint8_t inst64[8] = {0x48U, 0xc7U, 0xc0U, 0x02U, 0x0U, 0x0U, 0x0U, 0xc3U};
 
 	hypercall.val64 = val;
 
@@ -147,7 +131,11 @@ hyperv_setup_hypercall_page(const struct acrn_vcpu *vcpu, uint64_t val)
 		if (page_hva != NULL) {
 			stac();
 			(void)memset(page_hva, 0U, PAGE_SIZE);
-			(void)memcpy_s(page_hva, 11U, inst, 11U);
+			if (get_vcpu_mode(vcpu) == CPU_MODE_64BIT) {
+				(void)memcpy_s(page_hva, 8U, inst64, 8U);
+			} else {
+				(void)memcpy_s(page_hva, 11U, inst32, 11U);
+			}
 			clac();
 		}
 	}
@@ -173,15 +161,13 @@ hyperv_wrmsr(struct acrn_vcpu *vcpu, uint32_t msr, uint64_t wval)
 		vcpu->vm->arch_vm.hyperv.hypercall_page.val64 = wval;
 		hyperv_setup_hypercall_page(vcpu, wval);
 		break;
-	case HV_X64_MSR_VP_INDEX:
-		/* read only */
-		break;
-	case HV_X64_MSR_TIME_REF_COUNT:
-		/* read only */
-		break;
 	case HV_X64_MSR_REFERENCE_TSC:
 		hyperv_setup_tsc_page(vcpu, wval);
 		break;
+	case HV_X64_MSR_VP_INDEX:
+	case HV_X64_MSR_TIME_REF_COUNT:
+		/* read only */
+		/* fallthrough */
 	default:
 		pr_err("hv: %s: unexpected MSR[0x%x] write", __func__, msr);
 		ret = -1;
@@ -210,7 +196,7 @@ hyperv_rdmsr(struct acrn_vcpu *vcpu, uint32_t msr, uint64_t *rval)
 		*rval = vcpu->vcpu_id;
 		break;
 	case HV_X64_MSR_TIME_REF_COUNT:
-		*rval = hyperv_get_ref_count(vcpu->vm);
+		*rval = hyperv_get_ReferenceTime(vcpu->vm);
 		break;
 	case HV_X64_MSR_REFERENCE_TSC:
 		*rval = vcpu->vm->arch_vm.hyperv.ref_tsc_page.val64;
@@ -225,6 +211,33 @@ hyperv_rdmsr(struct acrn_vcpu *vcpu, uint32_t msr, uint64_t *rval)
 		__func__, msr, *rval, vcpu->vcpu_id, vcpu->vm->vm_id);
 
 	return ret;
+}
+
+void
+hyperv_init_time(struct acrn_vm *vm)
+{
+	uint64_t tsc_scale, tsc_khz = get_tsc_khz();
+	uint64_t tsc_offset;
+
+	/*
+	 * The partition reference time is computed by the following formula:
+	 * ReferenceTime = ((VirtualTsc * TscScale) >> 64) + TscOffset
+	 * ReferenceTime is in 100ns units
+	 *
+	 * ReferenceTime =
+	 *     VirtualTsc / (get_tsc_khz() * 1000) * 1000000000 / 100
+	 *     + TscOffset
+	 *
+	 * TscScale = (10000U << 64U) / get_tsc_khz()
+	 */
+	tsc_scale = u64_shl64_div_u64(10000U, tsc_khz);
+	tsc_offset = hyperv_scale_tsc(tsc_scale);
+
+	vm->arch_vm.hyperv.tsc_scale = tsc_scale;
+	vm->arch_vm.hyperv.tsc_offset = tsc_offset;
+
+	dev_dbg(DBG_LEVEL_HYPERV, "%s, tsc_scale = 0x%lx, tsc_offset = %ld",
+		__func__, tsc_scale, tsc_offset);
 }
 
 void
