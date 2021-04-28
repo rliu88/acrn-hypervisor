@@ -82,9 +82,16 @@ assign_pci_root_port(struct vmctx *ctx, struct passthru_dev *ptdev, struct pci_d
 /* Probe whether device and its root port support PTM */
 int ptm_probe(struct vmctx *ctx, struct passthru_dev *ptdev)
 {
+	int error = 0;
 	int pos, pcie_type, cap, rootport_ptm_offset, device_ptm_offset;
 	struct pci_device *phys_dev = ptdev->phys_dev;
+	struct pci_bridge_info bridge_info = {};
 	struct pci_device *root_port;
+
+	/* build pci hierarch */
+	error = scan_pci();
+	if (error)
+		return error;
 
 	if (!ptdev->pcie_cap) {
 		pr_err("%s Error: %x:%x.%x is not a pci-e device.\n", __func__,
@@ -122,6 +129,21 @@ int ptm_probe(struct vmctx *ctx, struct passthru_dev *ptdev)
 			pr_err("%s Error: root port %x:%x.%x of %x:%x.%x is not PTM root.\n",
 				__func__, root_port->bus, root_port->dev,
 				root_port->func, phys_dev->bus, phys_dev->dev, phys_dev->func);
+			return -EINVAL;
+		}
+
+		/* check whether more than one devices are connected to the root port.
+		 * if there are more than one devices are connected to the root port, we cannot
+		 * pass through this root port.
+		 */
+		error = pci_device_get_bridge_buses(root_port,
+					(int *)&(bridge_info.primary_bus),
+					(int *)&(bridge_info.secondary_bus),
+					(int *)&(bridge_info.subordinate_bus));
+
+		if (error || (get_device_count_on_bridge(&bridge_info) != 1)) {
+			pr_err("%s Error: Cannot pass through root port [%x:%x.%x] that has multiple children.\n",
+					__func__, root_port->bus, root_port->dev, root_port->func);
 			return -EINVAL;
 		}
 

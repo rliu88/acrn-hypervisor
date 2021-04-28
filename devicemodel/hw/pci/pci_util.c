@@ -184,6 +184,9 @@ int scan_pci(void)
 	struct pci_device *dev;
 	int i, prim_bus, sec_bus, sub_bus;
 
+	if (pci_scanned)
+		return 0;
+
 	TAILQ_INIT(&pci_device_q);
 
 	pci_scanned = 1;
@@ -234,7 +237,11 @@ int scan_pci(void)
 
 done:
 	if (error < 0)
+	{
+		pr_err("%s: failed to build pci hierarchy.\n", __func__);
 		clean_pci_cache();
+		pci_scanned = false;
+	}
 
 	pci_iterator_destroy(iter);
 
