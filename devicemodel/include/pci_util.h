@@ -16,4 +16,10 @@ int pci_pcie_type(struct pci_device *dev);
 bool is_root_port(struct pci_device *pdev);
 bool is_bridge(struct pci_device *pdev);
 
+int get_device_count_on_bus(int bus);
+int get_device_count_on_bridge(const struct pci_bridge_info *bridge_info);
+int scan_pci(void);
+struct pci_device * pci_find_root_port(const struct pci_device *pdev);
+void clean_pci_cache(void);
+
 #endif
